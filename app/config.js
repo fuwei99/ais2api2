@@ -89,7 +89,7 @@ function loadConfiguration(logger) {
     if (process.env.INSTANCE_NUM) config.instanceNum = parseInt(process.env.INSTANCE_NUM, 10) || config.instanceNum;
 
     for (const key in process.env) {
-        const match = key.match(/^(\d+)_TARGET_URL$/);
+        const match = key.match(/^TARGET_URL_(\d+)$/);
         if (match) {
             const port = parseInt(match[1], 10);
             config.portUrls[port] = process.env[key].trim();
