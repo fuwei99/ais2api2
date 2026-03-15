@@ -3,6 +3,7 @@ const session = require("express-session");
 const cookieParser = require("cookie-parser");
 const http = require("http");
 const crypto = require("crypto");
+const path = require("path");
 const { LoggingService, loadConfiguration } = require("./config");
 const AuthSource = require("./auth");
 const WsManager = require("./ws-manager");
@@ -19,8 +20,10 @@ const wsManager = new WsManager(logger);
 const browserPool = new BrowserPool(config, authSource, wsManager, logger);
 
 const app = express();
+
 app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, "web")));
 
 app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
@@ -59,13 +62,7 @@ const isAuthenticated = (req, res, next) => {
 
 app.get("/login", (req, res) => {
     if (req.session.isAuthenticated) return res.redirect("/");
-    const loginHtml = `
-  <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>登录</title>
-  <style>body{display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#f0f2f5}form{background:white;padding:40px;border-radius:10px;box-shadow:0 4px 8px rgba(0,0,0,0.1);text-align:center}input{width:250px;padding:10px;margin-top:10px;border:1px solid #ccc;border-radius:5px}button{width:100%;padding:10px;background-color:#007bff;color:white;border:none;border-radius:5px;margin-top:20px;cursor:pointer}.error{color:red;margin-top:10px}</style>
-  </head><body><form action="/login" method="post"><h2>请输入 API Key</h2>
-  <input type="password" name="apiKey" placeholder="API Key" required autofocus><button type="submit">登录</button>
-  ${req.query.error ? '<p class="error">API Key 错误!</p>' : ""}</form></body></html>`;
-    res.send(loginHtml);
+    res.sendFile(path.join(__dirname, "web", "login.html"));
 });
 
 app.post("/login", (req, res) => {
@@ -78,151 +75,8 @@ app.post("/login", (req, res) => {
     }
 });
 
-// ==== 完整的原版 Dashboard 还原，适配多实例 ====
 app.get("/", isAuthenticated, (req, res) => {
-    const accountOptionsHtml = authSource.availableIndices.map((index) => `<option value="${index}">账号 #${index}</option>`).join("");
-    const logs = logger.logBuffer || [];
-
-    const statusHtml = `
-    <!DOCTYPE html>
-    <html lang="zh-CN">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>多实例代理服务状态</title>
-        <style>
-        body { font-family: 'SF Mono', 'Consolas', 'Menlo', monospace; background-color: #f0f2f5; color: #333; padding: 2em; }
-        .container { max-width: 1000px; margin: 0 auto; background: #fff; padding: 1em 2em 2em 2em; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1, h2 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 0.5em;}
-        pre { background: #2d2d2d; color: #f0f0f0; font-size: 1.1em; padding: 1.5em; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.6; }
-        #log-container { font-size: 0.9em; max-height: 400px; overflow-y: auto; }
-        .status-ok { color: #2ecc71; font-weight: bold; }
-        .status-error { color: #e74c3c; font-weight: bold; }
-        .label { display: inline-block; width: 220px; box-sizing: border-box; }
-        .dot { height: 10px; width: 10px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-left: 10px; animation: blink 1s infinite alternate; }
-        @keyframes blink { from { opacity: 0.3; } to { opacity: 1; } }
-        .action-group { display: flex; flex-wrap: wrap; gap: 15px; align-items: center; }
-        .action-group button, .action-group select, .action-group input { font-size: 1em; border: 1px solid #ccc; padding: 10px 15px; border-radius: 8px; cursor: pointer; transition: background-color 0.3s ease; }
-        .action-group button:hover { opacity: 0.85; }
-        .action-group button { background-color: #007bff; color: white; border-color: #007bff; }
-        .action-group select, .action-group input { background-color: #ffffff; color: #000000; }
-        table { width: 100%; border-collapse: collapse; margin-top: 1em; }
-        th, td { padding: 12px; border: 1px solid #555; text-align: left; }
-        th { background-color: #444; color: white; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-        <h1>多实例代理服务状态 <span class="dot" title="数据动态刷新中..."></span></h1>
-        <div id="status-section">
-            <pre>
-<span class="label">服务状态</span>: <span class="status-ok">Running</span>
---- 全局配置 ---
-<span class="label">并发实例数</span>: ${config.instanceNum}
-<span class="label">流模式</span>: <span id="mode-span">${streamingModeGlobal}</span> (仅启用流式传输时生效)
-<span class="label">强制推理</span>: <span id="think-span">${forceThinkingGlobal ? "✅ 已启用" : "❌ 已关闭"}</span>
-<span class="label">立即切换 (状态码)</span>: ${config.immediateSwitchStatusCodes.length > 0 ? `[${config.immediateSwitchStatusCodes.join(", ")}]` : "已禁用"}
-<span class="label">API 密钥来源</span>: ${config.apiKeySource}
-<span class="label">扫描到的总账号</span>: [${authSource.initialIndices.join(", ")}] (总数: ${authSource.initialIndices.length})
-<span class="label">当前可用账号池</span>: <span id="avail-pool"></span>
-
---- 实例池实时大盘 ---
-<div id="instance-table"></div>
-            </pre>
-        </div>
-        <div id="actions-section" style="margin-top: 2em;">
-            <h2>操作面板</h2>
-            <div class="action-group">
-                <input type="number" id="targetPort" placeholder="输入要操作的实例端口(例如:9998)" style="width: 250px;">
-                <select id="accountIndexSelect">${accountOptionsHtml}</select>
-                <button onclick="switchSpecificAccount()">为该实例强制切号</button>
-                <button onclick="toggleStreamingMode()">切换流模式</button>
-                <button onclick="toggleForceThinking()">切换强制推理</button>
-            </div>
-        </div>
-        <div id="log-section" style="margin-top: 2em;">
-            <h2>实时日志 (最近 <span id="log-count">${logs.length}</span> 条)</h2>
-            <pre id="log-container">${logs.join("\n")}</pre>
-        </div>
-        </div>
-        <script>
-        function updateContent() {
-            fetch('/api/status').then(response => response.json()).then(data => {
-                document.getElementById('mode-span').innerText = data.streamingMode;
-                document.getElementById('think-span').innerText = data.forceThinking;
-                document.getElementById('avail-pool').innerText = "[" + data.available + "]";
-
-                let tb = "<table><tr><th>实例端口</th><th>实例状态</th><th>浏览器连接</th><th>占用账号</th><th>使用次数</th><th>连续失败</th><th>操作</th></tr>";
-                data.instances.forEach(i => {
-                  tb += '<tr>' +
-                    '<td>' + i.port + '</td>' +
-                    '<td class="' + (i.status === 'READY' ? 'status-ok' : 'status-error') + '">' + i.status + '</td>' +
-                    '<td class="' + (i.wsConnected ? 'status-ok' : 'status-error') + '">' + (i.wsConnected ? '✅ 已连接' : '❌ 断开') + '</td>' +
-                    '<td>' + i.account + '</td>' +
-                    '<td>' + i.uses + '</td>' +
-                    '<td>' + i.fails + '</td>' +
-                    '<td><button onclick="restartInstance(' + i.port + ')" style="padding:4px 8px;font-size:0.8em;background:#e74c3c;border-color:#e74c3c;">销毁并重启</button></td>' +
-                  '</tr>';
-                });
-                tb += "</table>";
-                document.getElementById('instance-table').innerHTML = tb;
-
-                const logContainer = document.getElementById('log-container');
-                const isScrolledToBottom = logContainer.scrollHeight - logContainer.clientHeight <= logContainer.scrollTop + 1;
-                document.getElementById('log-count').innerText = data.logCount;
-                logContainer.innerText = data.logs;
-                if (isScrolledToBottom) { logContainer.scrollTop = logContainer.scrollHeight; }
-            }).catch(error => console.error('Error fetching new content:', error));
-        }
-
-        function restartInstance(port) {
-            if (!confirm("确定要强制销毁并重启实例 [端口 " + port + "] 吗？")) return;
-            fetch('/api/restart-instance', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ port }) })
-            .then(res => res.text()).then(data => { alert(data); updateContent(); });
-        }
-
-        function switchSpecificAccount() {
-            const portInput = document.getElementById('targetPort').value;
-            const selectElement = document.getElementById('accountIndexSelect');
-            const targetIndex = selectElement.value;
-            if (!portInput) { alert("请先填写要操作的实例端口号！"); return; }
-            if (!confirm(\`确定要让实例 [\${portInput}] 强制切换到账号 #\${targetIndex} 吗？\`)) return;
-            
-            fetch('/api/switch-account', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ port: parseInt(portInput, 10), targetIndex: parseInt(targetIndex, 10) })
-            })
-            .then(res => res.text()).then(data => { alert(data); updateContent(); })
-            .catch(err => alert('❌ 操作失败: ' + err));
-        }
-            
-        function toggleStreamingMode() { 
-            const newMode = prompt('请输入新的流模式 (real 或 fake):', '${config.streamingMode}');
-            if (newMode === 'fake' || newMode === 'real') {
-                fetch('/api/set-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: newMode }) })
-                .then(res => res.text()).then(data => { alert(data); updateContent(); })
-                .catch(err => alert('设置失败: ' + err));
-            } else if (newMode !== null) { 
-                alert('无效的模式！请只输入 "real" 或 "fake"。'); 
-            } 
-        }
-
-        function toggleForceThinking() {
-            fetch('/api/toggle-force-thinking', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-            .then(res => res.text()).then(data => { alert(data); updateContent(); })
-            .catch(err => alert('设置失败: ' + err));
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            updateContent(); 
-            setInterval(updateContent, 3000);
-        });
-        </script>
-    </body>
-    </html>
-  `;
-    res.status(200).send(statusHtml);
+    res.sendFile(path.join(__dirname, "web", "index.html"));
 });
 
 app.get("/api/status", isAuthenticated, (req, res) => {
@@ -242,6 +96,7 @@ app.get("/api/status", isAuthenticated, (req, res) => {
         streamingMode: streamingModeGlobal,
         forceThinking: forceThinkingGlobal ? "✅ 已启用" : "❌ 已关闭",
         available: authSource.availableIndices.join(", "),
+        availableIndices: authSource.availableIndices,
         instances: instances,
         logs: logs.join("\n"),
         logCount: logs.length
